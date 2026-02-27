@@ -37,7 +37,7 @@ The install script will ask you for:
 
 | Parameter | Description | Example |
 |---|---|---|
-| **Steam ID** | Your 64-bit Steam identifier (17 digits) | `76561198040773990` |
+| **Steam ID** | Your 64-bit Steam identifier (17 digits) | `12345678901234567` |
 | **Port** | Web server port | `2251` |
 | **Scan hours** | Automatic scan hours (cron format) | `1,7,13,19` |
 
