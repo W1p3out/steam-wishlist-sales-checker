@@ -1,8 +1,10 @@
-# 🎮 Steam Wishlist Sales
+# Steam Wishlist Sales
+
+Code généré par Claude (Anthropic). Ceci est un projet pour comprendre la possibilité de récupérer des informations avec la commande "curl" et "Invoke-RestMethod" via l'API Steam.
 
 Surveille automatiquement votre wishlist Steam et affiche les jeux en promotion sur une page web élégante, auto-hébergée.
 
-![Steam Wishlist Sales](screenshots/preview.png)
+![Steam Wishlist Sales](screenshots/result.png)
 
 ## Fonctionnalités
 
