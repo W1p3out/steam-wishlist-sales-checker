@@ -1,4 +1,4 @@
-# 🎮 Steam Wishlist Sales
+# Steam Wishlist Sales
 
 Automatically monitors your Steam wishlist and displays games on sale on a sleek, self-hosted web page.
 
