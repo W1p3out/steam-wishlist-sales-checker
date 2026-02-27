@@ -1,5 +1,7 @@
 # Steam Wishlist Sales Checker
 
+Code written with Claude (Anthropic). This is a learning project to see how "curl" and "Invoke-RestMethod" commands could grab informations from Steam API.
+
 Automatically monitors your Steam wishlist and displays games on sale on a sleek, self-hosted web page.
 
 ![Steam Wishlist Sales](screenshots/result.png)
