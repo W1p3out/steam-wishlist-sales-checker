@@ -58,7 +58,7 @@ echo ""
 
 # Steam ID
 while true; do
-    read -p "  Steam ID (ex: 76561198040773990) : " STEAM_ID
+    read -p "  Steam ID (ex: 12345678901234567) : " STEAM_ID
     if [[ "$STEAM_ID" =~ ^[0-9]{17}$ ]]; then
         break
     fi
