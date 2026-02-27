@@ -2,7 +2,7 @@
 
 Automatically monitors your Steam wishlist and displays games on sale on a sleek, self-hosted web page.
 
-![Steam Wishlist Sales](screenshots/preview.png)
+![Steam Wishlist Sales](screenshots/result.png)
 
 ## Features
 
