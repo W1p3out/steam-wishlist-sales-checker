@@ -41,7 +41,7 @@ Surveille automatiquement votre wishlist Steam et affiche les jeux en promotion 
 
 ```bash
 git clone [https://github.com/VOTRE_USER/steam-wishlist-sales.git](https://github.com/W1p3out/steam-wishlist-sales-checker)
-cd steam-wishlist-sales
+cd steam-wishlist-sales-checker
 sudo ./install.sh
 ```
 
