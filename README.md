@@ -40,7 +40,7 @@ Automatically monitors your Steam wishlist and displays games on sale on a sleek
 ## Quick Install (Linux)
 
 ```bash
-git clone https://github.com/YOUR_USER/steam-wishlist-sales.git
+git clone https://github.com/W1p3out/steam-wishlist-sales-checker
 cd steam-wishlist-sales
 sudo ./install.sh
 ```
@@ -60,9 +60,9 @@ The installer will ask for:
 ## Windows Usage (PowerShell)
 
 ```powershell
-.\SteamWishlistSales.ps1 -SteamID 76561198040773990
-.\SteamWishlistSales.ps1 -SteamID 76561198040773990 -Country us
-.\SteamWishlistSales.ps1 76561198040773990 -ClearCache
+.\SteamWishlistSales.ps1 -SteamID 12345678901234567
+.\SteamWishlistSales.ps1 -SteamID 12345678901234567 -Country us
+.\SteamWishlistSales.ps1 12345678901234567 -ClearCache
 ```
 
 The script generates an HTML file in `%TEMP%` and opens it in your default browser. Cache is stored in `%APPDATA%\SteamWishlistSales\`.
