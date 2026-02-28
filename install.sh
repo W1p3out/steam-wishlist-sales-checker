@@ -58,7 +58,7 @@ echo ""
 
 # Steam ID
 while true; do
-    read -p "  Steam ID (ex: 12345678901234567) : " STEAM_ID
+    read -p "  Steam ID (ex: 76561198040773990) : " STEAM_ID
     if [[ "$STEAM_ID" =~ ^[0-9]{17}$ ]]; then
         break
     fi
@@ -124,6 +124,14 @@ cp "$SCRIPT_DIR/web/run.php" "$WEB_DIR/"
 cp "$SCRIPT_DIR/web/update.php" "$WEB_DIR/"
 
 ok "Fichiers copiés"
+
+# Initialiser le cache si absent
+if [ ! -f "$WEB_DIR/cache.json" ]; then
+    echo '{}' > "$WEB_DIR/cache.json"
+    chmod 644 "$WEB_DIR/cache.json"
+    chown www-data:www-data "$WEB_DIR/cache.json"
+    ok "Cache initialisé"
+fi
 
 # ── Configuration du Steam ID ─────────────────────────────────
 log "Configuration du Steam ID..."
