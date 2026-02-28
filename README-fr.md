@@ -21,7 +21,7 @@ Surveille automatiquement votre wishlist Steam et affiche les jeux en promotion 
 - **Statistiques** : nombre de promos, meilleure remise, prix le plus bas, prochain scan
 - **Responsive** : s'adapte au mobile et au desktop
 - **Leger** : page HTML statique, pas de base de donnees
-- **Version Windows** : script PowerShell standalone inclus
+- **Version Windows** : script PowerShell standalone inclus et exécutable à télécharger dans 'Releases'
 
 ## Prerequis
 
