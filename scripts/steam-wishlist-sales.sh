@@ -6,7 +6,8 @@
 # Utilise l'API Steam :
 #   1. IWishlistService/GetWishlist → récupère les app IDs
 #   2. appdetails (par lots) → récupère les prix et promos
-#   3. appdetails (individuel) → récupère les noms des jeux en promo
+#   3. appdetails (individuel) → récupère noms/images/genres
+#      (avec cache intelligent pour éviter les appels redondants)
 #
 # Dépendances : curl, jq, bc
 #   sudo apt install curl jq bc
@@ -15,7 +16,7 @@
 #   ./steam-wishlist-sales.sh
 #
 # Cron (toutes les 6h à partir de 19h05) :
-#   5 1,7,13,19 * * * /opt/steam-wishlist-sales/steam-wishlist-sales.sh >> /var/log/steam-wishlist-sales.log 2>&1
+#   5 1,7,13,19 * * * /opt/steam-wishlist-sales/steam-wishlist-sales.sh > /tmp/steam-wishlist-current.log 2>&1
 #
 # ═══════════════════════════════════════════════════════════════
 
@@ -23,6 +24,7 @@
 STEAM_ID="VOTRE_STEAM_ID"
 OUTPUT_DIR="/var/www/steam-wishlist-sales"
 OUTPUT_FILE="${OUTPUT_DIR}/index.html"
+CACHE_FILE="${OUTPUT_DIR}/cache.json"
 TEMP_DIR="/tmp/steam-wishlist-$$"
 LOCK_FILE="/tmp/steam-wishlist-sales.lock"
 BATCH_SIZE=30
@@ -66,6 +68,13 @@ done
 # ── Préparation ───────────────────────────────────────────────
 mkdir -p "$TEMP_DIR"
 mkdir -p "$OUTPUT_DIR"
+
+# Initialiser le cache s'il n'existe pas
+if [ ! -f "$CACHE_FILE" ]; then
+    echo '{}' > "$CACHE_FILE"
+    chmod 644 "$CACHE_FILE"
+    chown www-data:www-data "$CACHE_FILE" 2>/dev/null
+fi
 
 START_TIME=$(date +%s)
 log "Démarrage de la récupération de la wishlist Steam"
@@ -168,7 +177,8 @@ jq '
         capsule: ("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/" + .key + "/header.jpg"),
         normal_price: .value.data.price_overview.initial,
         sale_price: .value.data.price_overview.final,
-        discount_pct: .value.data.price_overview.discount_percent
+        discount_pct: .value.data.price_overview.discount_percent,
+        genres: []
       }
   ]
   | sort_by(.name | ascii_downcase)
@@ -179,47 +189,84 @@ SALE_COUNT=${SALE_COUNT:-0}
 ok "Jeux en promotion : $SALE_COUNT"
 
 # ═══════════════════════════════════════════════════════════════
-# ÉTAPE 4 : Récupérer les noms des jeux en promo (appel individuel)
+# ÉTAPE 4 : Récupérer noms/images/genres (avec CACHE intelligent)
 # ═══════════════════════════════════════════════════════════════
 if [ "$SALE_COUNT" -gt 0 ]; then
-    log "Récupération des noms des $SALE_COUNT jeux en promo..."
-
     SALE_IDS=($(jq -r '.[].appid' "$SALES_FILE"))
     NAMES_FILE="$TEMP_DIR/names.json"
-    echo '{}' > "$NAMES_FILE"
 
-    DONE=0
+    # Copier le cache existant comme base de travail
+    cp "$CACHE_FILE" "$NAMES_FILE"
+
+    # Identifier les IDs absents du cache
+    MISSING_IDS=()
+    CACHED_COUNT=0
     for APPID in "${SALE_IDS[@]}"; do
-        DONE=$((DONE + 1))
-        DETAIL_FILE="$TEMP_DIR/name_${APPID}.json"
-
-        HTTP_CODE=$(curl -sL --compressed -o "$DETAIL_FILE" -w "%{http_code}" \
-            --connect-timeout 10 \
-            --max-time 15 \
-            "https://store.steampowered.com/api/appdetails?appids=${APPID}&cc=${COUNTRY_CODE}")
-
-        if [ "$HTTP_CODE" -eq 200 ] && jq -e 'type == "object"' "$DETAIL_FILE" &>/dev/null; then
-            APP_NAME=$(jq -r --arg id "$APPID" '.[$id].data.name // empty' "$DETAIL_FILE" 2>/dev/null)
-            APP_IMG=$(jq -r --arg id "$APPID" '.[$id].data.header_image // empty' "$DETAIL_FILE" 2>/dev/null)
-
-            if [ -n "$APP_NAME" ]; then
-                APP_NAME_ESCAPED=$(echo "$APP_NAME" | sed 's/"/\\"/g')
-                APP_IMG_ESCAPED=$(echo "$APP_IMG" | sed 's/"/\\"/g')
-                echo "{\"$APPID\":{\"name\":\"$APP_NAME_ESCAPED\",\"img\":\"$APP_IMG_ESCAPED\"}}" > "$TEMP_DIR/name_entry.json"
-                jq -s '.[0] * .[1]' "$NAMES_FILE" "$TEMP_DIR/name_entry.json" > "$TEMP_DIR/names_merged.json"
-                mv "$TEMP_DIR/names_merged.json" "$NAMES_FILE"
-            fi
+        HAS_CACHE=$(jq -r --arg id "$APPID" 'if .[$id] and .[$id].name and (.[$id].name | length > 0) then "yes" else "no" end' "$NAMES_FILE" 2>/dev/null)
+        if [ "$HAS_CACHE" = "yes" ]; then
+            CACHED_COUNT=$((CACHED_COUNT + 1))
+        else
+            MISSING_IDS+=("$APPID")
         fi
-
-        if [ $((DONE % 20)) -eq 0 ]; then
-            log "  $DONE/$SALE_COUNT noms récupérés..."
-        fi
-
-        sleep 1
     done
 
-    ok "Noms récupérés : $DONE/$SALE_COUNT"
+    MISSING_COUNT=${#MISSING_IDS[@]}
+    ok "Cache : $CACHED_COUNT jeux en cache, $MISSING_COUNT à récupérer"
 
+    # Ne récupérer que les jeux manquants
+    if [ "$MISSING_COUNT" -gt 0 ]; then
+        log "Récupération des noms/genres de $MISSING_COUNT nouveaux jeux..."
+
+        DONE=0
+        for APPID in "${MISSING_IDS[@]}"; do
+            DONE=$((DONE + 1))
+            DETAIL_FILE="$TEMP_DIR/name_${APPID}.json"
+
+            HTTP_CODE=$(curl -sL --compressed -o "$DETAIL_FILE" -w "%{http_code}" \
+                --connect-timeout 10 \
+                --max-time 15 \
+                "https://store.steampowered.com/api/appdetails?appids=${APPID}&cc=${COUNTRY_CODE}")
+
+            if [ "$HTTP_CODE" -eq 200 ] && jq -e 'type == "object"' "$DETAIL_FILE" &>/dev/null; then
+                # Extraire nom, image et genres en une seule passe jq
+                ENTRY_JSON=$(jq --arg id "$APPID" '
+                    .[$id] |
+                    if .success == true and .data then
+                        {
+                            name: (.data.name // ""),
+                            img: (.data.header_image // ""),
+                            genres: ([.data.genres[]?.description] | join(","))
+                        }
+                    else null end
+                ' "$DETAIL_FILE" 2>/dev/null)
+
+                if [ "$ENTRY_JSON" != "null" ] && [ -n "$ENTRY_JSON" ]; then
+                    # Insérer dans le fichier names
+                    jq --arg id "$APPID" --argjson entry "$ENTRY_JSON" \
+                       '. + {($id): $entry}' \
+                       "$NAMES_FILE" > "$TEMP_DIR/names_merged.json"
+                    mv "$TEMP_DIR/names_merged.json" "$NAMES_FILE"
+                fi
+            fi
+
+            if [ $((DONE % 20)) -eq 0 ]; then
+                log "  $DONE/$MISSING_COUNT noms récupérés..."
+            fi
+
+            sleep 1
+        done
+
+        ok "Nouveaux noms récupérés : $DONE/$MISSING_COUNT"
+    else
+        ok "Tous les jeux sont en cache ! Aucun appel API nécessaire."
+    fi
+
+    # Sauvegarder le cache mis à jour
+    cp "$NAMES_FILE" "$CACHE_FILE"
+    chmod 644 "$CACHE_FILE"
+    chown www-data:www-data "$CACHE_FILE" 2>/dev/null
+
+    # Enrichir les données de vente avec noms + genres du cache
     ENRICHED_FILE="$TEMP_DIR/sales_enriched.json"
     jq --slurpfile names "$NAMES_FILE" '
       [
@@ -227,7 +274,8 @@ if [ "$SALE_COUNT" -gt 0 ]; then
         ($names[0][$game.appid] // null) as $detail |
         . + {
           name: (if $detail and $detail.name and ($detail.name | length > 0) then $detail.name else $game.name end),
-          capsule: (if $detail and $detail.img and ($detail.img | length > 0) then $detail.img else $game.capsule end)
+          capsule: (if $detail and $detail.img and ($detail.img | length > 0) then $detail.img else $game.capsule end),
+          genres: (if $detail and $detail.genres and ($detail.genres | length > 0) then ($detail.genres | split(",")) else [] end)
         }
       ]
       | sort_by(.name | ascii_downcase)
@@ -244,15 +292,27 @@ CHEAPEST=$(jq '[.[].sale_price] | if length > 0 then min else 0 end' "$SALES_FIL
 CHEAPEST_FMT=$(echo "scale=2; ${CHEAPEST:-0} / 100" | bc 2>/dev/null | sed 's/\./,/' || echo "0,00")
 NOW=$(date '+%d/%m/%Y à %H:%M')
 
+# Extraire la liste unique des genres pour les boutons filtres
+ALL_GENRES=$(jq -r '[.[].genres[]?] | unique | .[]' "$SALES_FILE" 2>/dev/null | grep -v '^$' | sort)
+
+GENRE_BUTTONS=""
+while IFS= read -r genre; do
+    if [ -n "$genre" ]; then
+        GENRE_BUTTONS="${GENRE_BUTTONS}<button class=\"genre-btn\" data-genre=\"${genre}\">${genre}</button>"
+    fi
+done <<< "$ALL_GENRES"
+
+# Générer les cartes HTML avec data-genres
 CARDS_HTML=$(jq -r '
   .[] |
-  "<a class=\"card\" data-name=\"\(.name | gsub("\""; "&quot;"))\" data-sale=\"\(.sale_price)\" data-disc=\"\(.discount_pct)\" href=\"https://store.steampowered.com/app/\(.appid)\" target=\"_blank\" rel=\"noopener\">"
+  "<a class=\"card\" data-name=\"\(.name | gsub("\""; "&quot;"))\" data-sale=\"\(.sale_price)\" data-disc=\"\(.discount_pct)\" data-genres=\"\([.genres[]?] | join(","))\" href=\"https://store.steampowered.com/app/\(.appid)\" target=\"_blank\" rel=\"noopener\">"
   + "<div class=\"img-wrap\">"
   + "<img src=\"\(.capsule)\" alt=\"\(.name | gsub("\""; "&quot;"))\" loading=\"lazy\" />"
   + "<span class=\"badge\">-\(.discount_pct)%</span>"
   + "</div>"
   + "<div class=\"info\">"
   + "<div class=\"name\">\(.name | gsub("<"; "&lt;") | gsub(">"; "&gt;"))</div>"
+  + "<div class=\"genres-row\">\([.genres[]?] | map("<span class=\"genre-tag\">" + (. | gsub("<"; "&lt;") | gsub(">"; "&gt;")) + "</span>") | join(""))</div>"
   + "<div class=\"prices\">"
   + "<span class=\"old\">\(.normal_price / 100 | tostring | gsub("\\."; ",") | if test(",") then . else . + ",00" end)€</span>"
   + "<span class=\"new\">\(.sale_price / 100 | tostring | gsub("\\."; ",") | if test(",") then . else . + ",00" end)€</span>"
@@ -262,6 +322,7 @@ CARDS_HTML=$(jq -r '
 
 log "Génération de la page HTML..."
 
+# ── Début du HTML : CSS complet (thème moderne + thème classic) ──
 cat > "$OUTPUT_FILE" << 'HTMLHEAD'
 <!DOCTYPE html>
 <html lang="fr">
@@ -274,6 +335,9 @@ cat > "$OUTPUT_FILE" << 'HTMLHEAD'
 <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
+    /* ════════════════════════════════════════════════════
+       THÈME MODERN (défaut)
+       ════════════════════════════════════════════════════ */
     body {
         background: #0a0e14;
         color: #c6d4df;
@@ -282,7 +346,6 @@ cat > "$OUTPUT_FILE" << 'HTMLHEAD'
         position: relative;
         overflow-x: hidden;
     }
-
     body::before {
         content: '';
         position: fixed;
@@ -293,246 +356,63 @@ cat > "$OUTPUT_FILE" << 'HTMLHEAD'
         pointer-events: none;
         z-index: 0;
     }
+    .container { max-width: 1500px; margin: 0 auto; padding: 28px 24px; position: relative; z-index: 1; }
 
-    .container {
-        max-width: 1500px;
-        margin: 0 auto;
-        padding: 28px 24px;
-        position: relative;
-        z-index: 1;
-    }
+    .header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; padding-bottom: 18px; border-bottom: 1px solid rgba(102, 192, 244, 0.1); }
+    .header h1 { font-family: 'Exo 2', sans-serif; font-size: 1.8rem; font-weight: 800; color: #fff; letter-spacing: -0.02em; display: flex; align-items: center; gap: 12px; }
+    .header h1 .icon { font-size: 1.5rem; filter: drop-shadow(0 0 8px rgba(102, 192, 244, 0.5)); }
+    .header-right { display: flex; align-items: center; gap: 14px; font-size: 0.82rem; color: #5a6a78; flex-wrap: wrap; }
+    .header-right .count { color: #66c0f4; font-weight: 600; font-size: 0.95rem; }
 
-    .header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-bottom: 20px;
-        padding-bottom: 18px;
-        border-bottom: 1px solid rgba(102, 192, 244, 0.1);
-    }
-    .header h1 {
-        font-family: 'Exo 2', sans-serif;
-        font-size: 1.8rem;
-        font-weight: 800;
-        color: #fff;
-        letter-spacing: -0.02em;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-    }
-    .header h1 .icon {
-        font-size: 1.5rem;
-        filter: drop-shadow(0 0 8px rgba(102, 192, 244, 0.5));
-    }
-    .header-right {
-        display: flex;
-        align-items: center;
-        gap: 14px;
-        font-size: 0.82rem;
-        color: #5a6a78;
-    }
-    .header-right .count {
-        color: #66c0f4;
-        font-weight: 600;
-        font-size: 0.95rem;
-    }
+    .refresh-btn { display: inline-flex; align-items: center; gap: 6px; background: rgba(102, 192, 244, 0.08); border: 1px solid rgba(102, 192, 244, 0.2); color: #66c0f4; padding: 6px 16px; border-radius: 20px; font-size: 0.82rem; font-family: 'Outfit', sans-serif; cursor: pointer; transition: all 0.25s; text-decoration: none; }
+    .refresh-btn:hover { background: rgba(102, 192, 244, 0.18); color: #fff; border-color: #66c0f4; }
 
-    .refresh-btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        background: rgba(102, 192, 244, 0.08);
-        border: 1px solid rgba(102, 192, 244, 0.2);
-        color: #66c0f4;
-        padding: 6px 16px;
-        border-radius: 20px;
-        font-size: 0.82rem;
-        font-family: 'Outfit', sans-serif;
-        cursor: pointer;
-        transition: all 0.25s;
-        text-decoration: none;
-    }
-    .refresh-btn:hover {
-        background: rgba(102, 192, 244, 0.18);
-        color: #fff;
-        border-color: #66c0f4;
-    }
+    .theme-btn { display: inline-flex; align-items: center; gap: 5px; background: rgba(164, 208, 7, 0.08); border: 1px solid rgba(164, 208, 7, 0.2); color: #a4d007; padding: 6px 14px; border-radius: 20px; font-size: 0.78rem; font-family: 'Outfit', sans-serif; cursor: pointer; transition: all 0.25s; }
+    .theme-btn:hover { background: rgba(164, 208, 7, 0.18); color: #fff; border-color: #a4d007; }
 
-    .stats {
-        display: flex;
-        gap: 20px;
-        flex-wrap: wrap;
-        margin-bottom: 18px;
-        padding: 14px 18px;
-        background: rgba(255,255,255,0.02);
-        border: 1px solid rgba(102, 192, 244, 0.08);
-        border-radius: 10px;
-        font-size: 0.82rem;
-    }
+    .stats { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 18px; padding: 14px 18px; background: rgba(255,255,255,0.02); border: 1px solid rgba(102, 192, 244, 0.08); border-radius: 10px; font-size: 0.82rem; }
     .stats span { color: #8f98a0; }
     .stats .val { color: #66c0f4; font-weight: 600; }
     .stats .val-green { color: #a4d007; font-weight: 600; }
 
-    .controls {
-        display: flex;
-        gap: 12px;
-        margin-bottom: 20px;
-        flex-wrap: wrap;
-        align-items: center;
-    }
-    .search-box {
-        flex: 1;
-        min-width: 200px;
-        max-width: 380px;
-    }
-    .search-box input {
-        width: 100%;
-        padding: 9px 18px;
-        border-radius: 24px;
-        border: 1px solid rgba(102, 192, 244, 0.18);
-        background: rgba(0,0,0,0.35);
-        color: #c6d4df;
-        font-size: 0.88rem;
-        font-family: 'Outfit', sans-serif;
-        outline: none;
-        transition: border-color 0.25s, box-shadow 0.25s;
-    }
-    .search-box input:focus {
-        border-color: #66c0f4;
-        box-shadow: 0 0 12px rgba(102, 192, 244, 0.15);
-    }
+    .controls { display: flex; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+    .search-box { flex: 1; min-width: 200px; max-width: 380px; }
+    .search-box input { width: 100%; padding: 9px 18px; border-radius: 24px; border: 1px solid rgba(102, 192, 244, 0.18); background: rgba(0,0,0,0.35); color: #c6d4df; font-size: 0.88rem; font-family: 'Outfit', sans-serif; outline: none; transition: border-color 0.25s, box-shadow 0.25s; }
+    .search-box input:focus { border-color: #66c0f4; box-shadow: 0 0 12px rgba(102, 192, 244, 0.15); }
     .search-box input::placeholder { color: #3e4f5e; }
 
-    .toolbar {
-        display: flex;
-        gap: 6px;
-        flex-wrap: wrap;
-    }
-    .toolbar button {
-        background: rgba(102, 192, 244, 0.06);
-        border: 1px solid rgba(102, 192, 244, 0.14);
-        color: #8f98a0;
-        padding: 7px 18px;
-        border-radius: 24px;
-        font-size: 0.82rem;
-        cursor: pointer;
-        transition: all 0.2s;
-        font-family: 'Outfit', sans-serif;
-    }
-    .toolbar button:hover {
-        background: rgba(102, 192, 244, 0.14);
-        color: #fff;
-    }
-    .toolbar button.active {
-        background: linear-gradient(135deg, #66c0f4, #4a9fd4);
-        color: #fff;
-        border-color: transparent;
-        font-weight: 600;
-        box-shadow: 0 2px 12px rgba(102, 192, 244, 0.25);
-    }
+    .toolbar { display: flex; gap: 6px; flex-wrap: wrap; }
+    .toolbar button { background: rgba(102, 192, 244, 0.06); border: 1px solid rgba(102, 192, 244, 0.14); color: #8f98a0; padding: 7px 18px; border-radius: 24px; font-size: 0.82rem; cursor: pointer; transition: all 0.2s; font-family: 'Outfit', sans-serif; }
+    .toolbar button:hover { background: rgba(102, 192, 244, 0.14); color: #fff; }
+    .toolbar button.active { background: linear-gradient(135deg, #66c0f4, #4a9fd4); color: #fff; border-color: transparent; font-weight: 600; box-shadow: 0 2px 12px rgba(102, 192, 244, 0.25); }
 
-    .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-        gap: 14px;
-    }
+    .genre-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 18px; }
+    .genre-btn { background: rgba(164, 208, 7, 0.06); border: 1px solid rgba(164, 208, 7, 0.12); color: #6a7a58; padding: 5px 14px; border-radius: 20px; font-size: 0.75rem; cursor: pointer; transition: all 0.2s; font-family: 'Outfit', sans-serif; }
+    .genre-btn:hover { background: rgba(164, 208, 7, 0.14); color: #a4d007; }
+    .genre-btn.active { background: linear-gradient(135deg, #a4d007, #7aa800); color: #fff; border-color: transparent; font-weight: 600; }
 
-    .card {
-        background: linear-gradient(160deg, #141c27 0%, #0f1923 100%);
-        border-radius: 10px;
-        overflow: hidden;
-        text-decoration: none;
-        color: inherit;
-        transition: transform 0.25s ease, box-shadow 0.25s ease;
-        display: flex;
-        flex-direction: column;
-        border: 1px solid rgba(102, 192, 244, 0.05);
-        opacity: 0;
-        animation: fadeSlideUp 0.4s ease forwards;
-    }
-    .card:hover {
-        transform: translateY(-5px) scale(1.01);
-        box-shadow:
-            0 12px 35px rgba(0, 0, 0, 0.5),
-            0 0 20px rgba(102, 192, 244, 0.06);
-    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
 
-    .img-wrap {
-        position: relative;
-        aspect-ratio: 460 / 215;
-        overflow: hidden;
-        background: #080c12;
-    }
-    .img-wrap img {
-        width: 100%; height: 100%;
-        object-fit: cover;
-        transition: transform 0.4s ease;
-    }
+    .card { background: linear-gradient(160deg, #141c27 0%, #0f1923 100%); border-radius: 10px; overflow: hidden; text-decoration: none; color: inherit; transition: transform 0.25s ease, box-shadow 0.25s ease; display: flex; flex-direction: column; border: 1px solid rgba(102, 192, 244, 0.05); opacity: 0; animation: fadeSlideUp 0.4s ease forwards; }
+    .card:hover { transform: translateY(-5px) scale(1.01); box-shadow: 0 12px 35px rgba(0, 0, 0, 0.5), 0 0 20px rgba(102, 192, 244, 0.06); }
+
+    .img-wrap { position: relative; aspect-ratio: 460 / 215; overflow: hidden; background: #080c12; }
+    .img-wrap img { width: 100%; height: 100%; object-fit: cover; transition: transform 0.4s ease; }
     .card:hover .img-wrap img { transform: scale(1.07); }
 
-    .badge {
-        position: absolute;
-        top: 0; right: 0;
-        background: linear-gradient(135deg, #a4d007, #7aa800);
-        color: #fff;
-        font-family: 'Exo 2', sans-serif;
-        font-weight: 800;
-        font-size: 0.92rem;
-        padding: 5px 12px 5px 14px;
-        border-radius: 0 0 0 10px;
-        letter-spacing: -0.03em;
-        text-shadow: 0 1px 3px rgba(0,0,0,0.3);
-    }
+    .badge { position: absolute; top: 0; right: 0; background: linear-gradient(135deg, #a4d007, #7aa800); color: #fff; font-family: 'Exo 2', sans-serif; font-weight: 800; font-size: 0.92rem; padding: 5px 12px 5px 14px; border-radius: 0 0 0 10px; letter-spacing: -0.03em; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
 
-    .info {
-        padding: 12px 14px 14px;
-        display: flex;
-        flex-direction: column;
-        gap: 7px;
-        flex: 1;
-    }
-    .name {
-        font-size: 0.92rem;
-        font-weight: 600;
-        color: #fff;
-        line-height: 1.3;
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-    }
-    .prices {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-top: auto;
-    }
-    .old {
-        font-size: 0.8rem;
-        color: #6a7a88;
-        text-decoration: line-through;
-    }
-    .new {
-        font-family: 'Exo 2', sans-serif;
-        font-size: 1.08rem;
-        font-weight: 800;
-        color: #a4d007;
-        text-shadow: 0 0 10px rgba(164, 208, 7, 0.15);
-    }
+    .info { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 5px; flex: 1; }
+    .name { font-size: 0.92rem; font-weight: 600; color: #fff; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .genres-row { display: flex; gap: 4px; flex-wrap: wrap; min-height: 18px; }
+    .genre-tag { font-size: 0.62rem; color: #6a7a88; background: rgba(255,255,255,0.04); padding: 1px 7px; border-radius: 8px; white-space: nowrap; }
+    .prices { display: flex; align-items: center; gap: 10px; margin-top: auto; }
+    .old { font-size: 0.8rem; color: #6a7a88; text-decoration: line-through; }
+    .new { font-family: 'Exo 2', sans-serif; font-size: 1.08rem; font-weight: 800; color: #a4d007; text-shadow: 0 0 10px rgba(164, 208, 7, 0.15); }
 
-    .empty {
-        text-align: center;
-        padding: 80px 20px;
-        color: #3e4f5e;
-        font-size: 1.1rem;
-    }
+    .empty { text-align: center; padding: 80px 20px; color: #3e4f5e; font-size: 1.1rem; }
 
-    @keyframes fadeSlideUp {
-        from { opacity: 0; transform: translateY(18px); }
-        to   { opacity: 1; transform: translateY(0); }
-    }
+    @keyframes fadeSlideUp { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
 
     @media (max-width: 640px) {
         .container { padding: 14px 10px; }
@@ -543,6 +423,148 @@ cat > "$OUTPUT_FILE" << 'HTMLHEAD'
         .badge { font-size: 0.8rem; padding: 3px 9px 3px 11px; }
         .stats { gap: 12px; font-size: 0.75rem; }
     }
+
+    /* ════════════════════════════════════════════════════
+       THÈME CLASSIC STEAM (2004-2010)
+       Vert olive, Tahoma, bordures biseautées
+       ════════════════════════════════════════════════════ */
+    body.classic {
+        background: #3b4a36;
+        color: #d2d2d2;
+        font-family: Tahoma, Verdana, Arial, sans-serif;
+    }
+    body.classic::before {
+        background: linear-gradient(180deg, #4a5a42 0%, #3b4a36 40%, #2d3a28 100%);
+    }
+
+    body.classic .container { max-width: 1200px; padding: 12px 16px; }
+
+    body.classic .header {
+        background: linear-gradient(180deg, #5c7a49 0%, #4a6637 100%);
+        border: 1px solid #6b8a56;
+        border-bottom: 2px solid #2d3a28;
+        border-radius: 0;
+        padding: 8px 14px;
+        margin-bottom: 10px;
+    }
+    body.classic .header h1 {
+        font-family: Tahoma, Verdana, sans-serif;
+        font-size: 1.15rem;
+        font-weight: bold;
+        color: #d2e8b0;
+        letter-spacing: 0;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+    }
+    body.classic .header h1 .icon { font-size: 1rem; filter: none; }
+    body.classic .header-right { font-size: 0.72rem; color: #a0b890; }
+    body.classic .header-right .count { color: #d2e8b0; font-size: 0.78rem; }
+
+    body.classic .refresh-btn,
+    body.classic .theme-btn {
+        background: linear-gradient(180deg, #6b8a56 0%, #4a6637 100%);
+        border: 1px solid #7a9a64;
+        border-bottom: 1px solid #3a5228;
+        color: #d2e8b0;
+        border-radius: 3px;
+        padding: 3px 12px;
+        font-family: Tahoma, sans-serif;
+        font-size: 0.72rem;
+    }
+    body.classic .refresh-btn:hover,
+    body.classic .theme-btn:hover {
+        background: linear-gradient(180deg, #7a9a64 0%, #5a7a47 100%);
+        color: #fff;
+    }
+
+    body.classic .stats {
+        background: linear-gradient(180deg, #4a5a42 0%, #3e4e38 100%);
+        border: 1px solid #5a6a52;
+        border-radius: 0;
+        padding: 8px 12px;
+        font-size: 0.72rem;
+    }
+    body.classic .stats span { color: #a0b890; }
+    body.classic .stats .val { color: #d2e8b0; }
+    body.classic .stats .val-green { color: #a4d007; }
+
+    body.classic .search-box input {
+        border-radius: 2px;
+        border: 1px solid #5a6a52;
+        background: #2d3a28;
+        color: #d2d2d2;
+        font-family: Tahoma, sans-serif;
+        font-size: 0.78rem;
+        padding: 5px 10px;
+    }
+    body.classic .search-box input:focus { border-color: #7a9a64; box-shadow: none; }
+    body.classic .search-box input::placeholder { color: #6a7a62; }
+
+    body.classic .toolbar button {
+        background: linear-gradient(180deg, #5c7a49 0%, #4a6637 100%);
+        border: 1px solid #6b8a56;
+        border-bottom: 1px solid #3a5228;
+        color: #a0b890;
+        border-radius: 2px;
+        padding: 4px 12px;
+        font-family: Tahoma, sans-serif;
+        font-size: 0.72rem;
+    }
+    body.classic .toolbar button:hover { color: #d2e8b0; }
+    body.classic .toolbar button.active {
+        background: linear-gradient(180deg, #7a9a64 0%, #5a7a47 100%);
+        color: #fff;
+        border-color: #8aaa74;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.1);
+    }
+
+    body.classic .genre-btn {
+        background: linear-gradient(180deg, #4a5a42 0%, #3e4e38 100%);
+        border: 1px solid #5a6a52;
+        color: #8a9a80;
+        border-radius: 2px;
+        padding: 3px 10px;
+        font-family: Tahoma, sans-serif;
+        font-size: 0.68rem;
+    }
+    body.classic .genre-btn:hover { color: #d2e8b0; }
+    body.classic .genre-btn.active {
+        background: linear-gradient(180deg, #7a9a64 0%, #5a7a47 100%);
+        color: #fff;
+        border-color: #8aaa74;
+    }
+
+    body.classic .grid { gap: 8px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+
+    body.classic .card {
+        background: linear-gradient(180deg, #4a5a42 0%, #3e4e38 100%);
+        border: 1px solid #5a6a52;
+        border-radius: 0;
+        animation: none;
+        opacity: 1;
+    }
+    body.classic .card:hover {
+        transform: none;
+        box-shadow: 0 0 0 1px #8aaa74;
+        border-color: #8aaa74;
+    }
+    body.classic .card:hover .img-wrap img { transform: none; }
+
+    body.classic .img-wrap { background: #2d3a28; }
+
+    body.classic .badge {
+        background: #4a7a20;
+        border-radius: 0;
+        font-family: Tahoma, sans-serif;
+        font-size: 0.82rem;
+        font-weight: bold;
+        padding: 2px 8px;
+    }
+
+    body.classic .info { padding: 8px 10px 10px; gap: 4px; }
+    body.classic .name { font-size: 0.8rem; font-weight: bold; font-family: Tahoma, sans-serif; color: #d2e8b0; }
+    body.classic .genre-tag { font-size: 0.58rem; color: #8a9a80; background: rgba(0,0,0,0.2); border-radius: 2px; padding: 1px 5px; }
+    body.classic .old { font-size: 0.72rem; color: #8a9a80; }
+    body.classic .new { font-family: Tahoma, sans-serif; font-size: 0.88rem; font-weight: bold; color: #a4d007; text-shadow: none; }
 </style>
 </head>
 <body>
@@ -553,9 +575,11 @@ cat > "$OUTPUT_FILE" << 'HTMLHEAD'
     <div class="header-right">
 HTMLHEAD
 
+# ── Partie dynamique (variables Bash interpolées) ──
 cat >> "$OUTPUT_FILE" << HTMLMETA
         <span class="count" id="count">${SALE_COUNT} jeu$([ "$SALE_COUNT" -gt 1 ] && echo "x") en promo</span>
         <span>Mis à jour le ${NOW} (${ELAPSED}s)</span>
+        <button class="theme-btn" id="themeToggle" onclick="toggleTheme()">🖥️ Classic Steam</button>
         <a class="refresh-btn" href="run.php">
             <span class="refresh-icon">↻</span>
             Actualiser
@@ -582,8 +606,14 @@ cat >> "$OUTPUT_FILE" << HTMLMETA
         <button data-sort="discount">% Promo</button>
     </div>
 </div>
+
+<div class="genre-filters" id="genreFilters">
+    <button class="genre-btn active" data-genre="all">Tous</button>
+    ${GENRE_BUTTONS}
+</div>
 HTMLMETA
 
+# ── Grille de cartes ──
 echo '<div class="grid" id="grid">' >> "$OUTPUT_FILE"
 if [ "$SALE_COUNT" -gt 0 ]; then
     echo "$CARDS_HTML" >> "$OUTPUT_FILE"
@@ -592,22 +622,23 @@ else
 fi
 echo '</div>' >> "$OUTPUT_FILE"
 
+# ── JavaScript (non interpolé) ──
 cat >> "$OUTPUT_FILE" << 'HTMLSCRIPT'
 
 <script>
+// ── Animations d'entrée ──
 document.querySelectorAll('.card').forEach((c, i) => {
     c.style.animationDelay = Math.min(i * 30, 800) + 'ms';
 });
 
+// ── Tri ──
 document.querySelectorAll('.toolbar button').forEach(btn => {
     btn.addEventListener('click', () => {
         document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-
         const grid = document.getElementById('grid');
         const cards = Array.from(grid.querySelectorAll('.card'));
         const mode = btn.dataset.sort;
-
         cards.sort((a, b) => {
             switch(mode) {
                 case 'alpha': return a.dataset.name.localeCompare(b.dataset.name, 'fr', {sensitivity:'base'});
@@ -616,36 +647,72 @@ document.querySelectorAll('.toolbar button').forEach(btn => {
                 case 'discount': return Number(b.dataset.disc) - Number(a.dataset.disc);
             }
         });
-
         cards.forEach((c, i) => {
-            c.style.animation = 'none';
-            c.offsetHeight;
-            c.style.animation = '';
+            c.style.animation = 'none'; c.offsetHeight; c.style.animation = '';
             c.style.animationDelay = Math.min(i * 20, 500) + 'ms';
             grid.appendChild(c);
         });
     });
 });
 
-document.getElementById('search').addEventListener('input', e => {
-    const q = e.target.value.toLowerCase();
-    const cards = document.querySelectorAll('.card');
+// ── Filtres combinés (recherche + genre) ──
+let activeGenre = 'all';
+
+function applyFilters() {
+    const q = document.getElementById('search').value.toLowerCase();
     let visible = 0;
-    cards.forEach(c => {
+    document.querySelectorAll('.card').forEach(c => {
         const name = c.querySelector('.name').textContent.toLowerCase();
-        const show = name.includes(q);
+        const genres = (c.dataset.genres || '').toLowerCase();
+        const matchSearch = name.includes(q);
+        const matchGenre = activeGenre === 'all' || genres.split(',').some(g => g.trim().toLowerCase() === activeGenre.toLowerCase());
+        const show = matchSearch && matchGenre;
         c.style.display = show ? '' : 'none';
         if (show) visible++;
     });
     document.getElementById('count').textContent = visible + ' jeu' + (visible > 1 ? 'x' : '') + ' en promo';
+}
+
+document.getElementById('search').addEventListener('input', applyFilters);
+
+document.querySelectorAll('.genre-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.genre-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeGenre = btn.dataset.genre;
+        applyFilters();
+    });
 });
 
-// Calcul du prochain scan auto (1h05, 7h05, 13h05, 19h05)
+// ── Switch de thème (Modern ↔ Classic Steam) ──
+function toggleTheme() {
+    const body = document.body;
+    const btn = document.getElementById('themeToggle');
+    if (body.classList.contains('classic')) {
+        body.classList.remove('classic');
+        btn.innerHTML = '🖥️ Classic Steam';
+        document.cookie = 'theme=modern;path=/;max-age=31536000';
+    } else {
+        body.classList.add('classic');
+        btn.innerHTML = '✨ Modern';
+        document.cookie = 'theme=classic;path=/;max-age=31536000';
+    }
+}
+
+// Restaurer le thème sauvegardé
+(function() {
+    const m = document.cookie.match(/theme=(\w+)/);
+    if (m && m[1] === 'classic') {
+        document.body.classList.add('classic');
+        document.getElementById('themeToggle').innerHTML = '✨ Modern';
+    }
+})();
+
+// ── Prochain scan auto (1h05, 7h05, 13h05, 19h05) ──
 (function() {
     const schedules = [1, 7, 13, 19];
     const now = new Date();
     let next = null;
-
     for (const h of schedules) {
         const candidate = new Date(now);
         candidate.setHours(h, 5, 0, 0);
@@ -656,7 +723,6 @@ document.getElementById('search').addEventListener('input', e => {
         next.setDate(next.getDate() + 1);
         next.setHours(schedules[0], 5, 0, 0);
     }
-
     const el = document.getElementById('nextScan');
     function update() {
         const diff = Math.max(0, Math.floor((next - new Date()) / 1000));
