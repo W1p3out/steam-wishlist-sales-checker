@@ -6,6 +6,7 @@ An executable is also available for Windows if you want to simply scan your wish
 Automatically monitors your Steam wishlist and displays games on sale on a sleek, self-hosted web page.
 
 ![Steam Wishlist Sales](screenshots/result.png)
+![Steam Wishlist Sales](screenshots/result-classic.png)
 
 ## Features
 
