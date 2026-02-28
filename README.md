@@ -41,7 +41,7 @@ Automatically monitors your Steam wishlist and displays games on sale on a sleek
 
 ```bash
 git clone https://github.com/W1p3out/steam-wishlist-sales-checker
-cd steam-wishlist-sales
+cd steam-wishlist-sales-checker
 sudo ./install.sh
 ```
 
