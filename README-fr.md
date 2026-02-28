@@ -40,7 +40,7 @@ Surveille automatiquement votre wishlist Steam et affiche les jeux en promotion 
 ## Installation rapide (Linux)
 
 ```bash
-git clone https://github.com/VOTRE_USER/steam-wishlist-sales.git
+git clone [https://github.com/VOTRE_USER/steam-wishlist-sales.git](https://github.com/W1p3out/steam-wishlist-sales-checker)
 cd steam-wishlist-sales
 sudo ./install.sh
 ```
@@ -49,7 +49,7 @@ Le script d'installation vous demandera :
 
 | Parametre | Description | Exemple |
 |---|---|---|
-| **Steam ID** | Votre identifiant Steam 64-bit (17 chiffres) | `76561198040773990` |
+| **Steam ID** | Votre identifiant Steam 64-bit (17 chiffres) | `12345678901234567` |
 | **Port** | Port du serveur web | `2251` |
 | **Heures de scan** | Heures de scan automatique (format cron) | `1,7,13,19` |
 
@@ -60,9 +60,9 @@ Le script d'installation vous demandera :
 ## Utilisation Windows (PowerShell)
 
 ```powershell
-.\SteamWishlistSales.ps1 -SteamID 76561198040773990
-.\SteamWishlistSales.ps1 -SteamID 76561198040773990 -Country us
-.\SteamWishlistSales.ps1 76561198040773990 -ClearCache
+.\SteamWishlistSales.ps1 -SteamID 12345678901234567
+.\SteamWishlistSales.ps1 -SteamID 12345678901234567 -Country us
+.\SteamWishlistSales.ps1 12345678901234567 -ClearCache
 ```
 
 Le script genere un fichier HTML dans `%TEMP%` et l'ouvre automatiquement dans le navigateur. Le cache est stocke dans `%APPDATA%\SteamWishlistSales\`.
