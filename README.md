@@ -21,7 +21,7 @@ Automatically monitors your Steam wishlist and displays games on sale on a sleek
 - **Statistics**: sale count, best discount, lowest price, next scan countdown
 - **Responsive**: adapts to mobile and desktop
 - **Lightweight**: static HTML page, no database required
-- **Windows version**: standalone PowerShell script included
+- **Windows version**: standalone PowerShell script included and executable in 'Releases'
 
 ## Requirements
 
