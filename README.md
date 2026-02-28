@@ -49,7 +49,7 @@ The installer will ask for:
 
 | Parameter | Description | Example |
 |---|---|---|
-| **Steam ID** | Your 64-bit Steam ID (17 digits) | `76561198040773990` |
+| **Steam ID** | Your 64-bit Steam ID (17 digits) | `12345678901234567` |
 | **Port** | Web server port | `2251` |
 | **Scan hours** | Automatic scan schedule (cron format) | `1,7,13,19` |
 
