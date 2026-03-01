@@ -1,4 +1,4 @@
-# 🎮 Steam Wishlist Sales Checker
+# 🎮 Steam Wishlist Sales Checker (v1.1)
 
 Code généré par Claude (Anthropic). Ceci est un projet pour comprendre la possibilité de récupérer des informations avec la commande "curl" et "Invoke-RestMethod" via l'API Steam.
 Une version exécutable pour Windows est également disponible sans aucune installation pour simplement vérifier les promotions de votre liste de souhaits Steam, dans la page "Releases".
